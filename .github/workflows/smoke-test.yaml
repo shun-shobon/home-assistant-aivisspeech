@@ -56,7 +56,7 @@ jobs:
       - name: Wait for engine
         shell: bash
         run: |
-          for attempt in $(seq 1 120); do
+          for _ in $(seq 1 120); do
             if curl --fail --silent http://127.0.0.1:10101/version > /tmp/version; then
               cat /tmp/version
               exit 0
@@ -109,7 +109,7 @@ jobs:
           sudo touch /tmp/aivisspeech-share/aivisspeech/Models/persistence-marker
           docker restart aivisspeech-smoke
 
-          for attempt in $(seq 1 120); do
+          for _ in $(seq 1 120); do
             if curl --fail --silent http://127.0.0.1:10101/speakers > /tmp/speakers-after-restart.json; then
               test -s /tmp/speakers-after-restart.json
               test -f /tmp/aivisspeech-share/aivisspeech/Models/persistence-marker
