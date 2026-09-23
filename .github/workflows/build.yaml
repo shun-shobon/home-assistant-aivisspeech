@@ -1,0 +1,117 @@
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate add-on
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Home Assistant Add-on Linter
+        uses: frenck/action-addon-linter@v2.21
+        with:
+          path: ./aivisspeech
+
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read and validate version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version: "\([^"]*\)"/\1/p' aivisspeech/config.yaml)"
+          if [[ -z "${version}" ]]; then
+            echo "Could not read the add-on version." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match add-on version ${version}." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs:
+      - prepare
+      - validate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        uses: home-assistant/builder/actions/build-image@2026.09.0
+        with:
+          arch: ${{ matrix.arch }}
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          context: ./aivisspeech
+          image: ghcr.io/shun-shobon/${{ matrix.arch }}-home-assistant-aivisspeech
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+          labels: |
+            io.hass.type=app
+            io.hass.name=AivisSpeech Engine
+            io.hass.description=AivisSpeech Engine for Home Assistant TTS
+            io.hass.url=https://github.com/shun-shobon/home-assistant-aivisspeech
+          push: ${{ github.ref_type == 'tag' }}
+          version: ${{ needs.prepare.outputs.version }}
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs:
+      - prepare
+      - build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      packages: write
+    steps:
+      - name: Publish multi-arch manifest
+        uses: home-assistant/builder/actions/publish-multi-arch-manifest@2026.09.0
+        with:
+          architectures: '["amd64", "aarch64"]'
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          image-name: home-assistant-aivisspeech
+          image-tags: |
+            ${{ needs.prepare.outputs.version }}
+            latest
+          registry-prefix: ghcr.io/shun-shobon

@@ -1,0 +1,130 @@
+name: Smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Test amd64 image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version: "\([^"]*\)"/\1/p' aivisspeech/config.yaml)"
+          if [[ -z "${version}" ]]; then
+            echo "Could not read the add-on version." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build image
+        uses: home-assistant/builder/actions/build-image@2026.09.0
+        with:
+          arch: amd64
+          container-registry-password: ${{ secrets.GITHUB_TOKEN }}
+          context: ./aivisspeech
+          cosign: false
+          image: local/home-assistant-aivisspeech
+          image-tags: smoke
+          load: true
+          push: false
+          version: ${{ steps.version.outputs.version }}
+
+      - name: Start engine
+        shell: bash
+        run: |
+          mkdir -p /tmp/aivisspeech-share
+          docker run --detach \
+            --name aivisspeech-smoke \
+            --publish 127.0.0.1:10101:10101 \
+            --volume /tmp/aivisspeech-share:/share \
+            local/home-assistant-aivisspeech:smoke
+
+      - name: Wait for engine
+        shell: bash
+        run: |
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:10101/version > /tmp/version; then
+              cat /tmp/version
+              exit 0
+            fi
+            if [[ "$(docker inspect --format '{{.State.Running}}' aivisspeech-smoke)" != "true" ]]; then
+              docker logs aivisspeech-smoke
+              exit 1
+            fi
+            sleep 10
+          done
+          docker logs aivisspeech-smoke
+          echo "AivisSpeech Engine did not become ready within 20 minutes." >&2
+          exit 1
+
+      - name: Test VOICEVOX-compatible synthesis
+        shell: bash
+        run: |
+          curl --fail --silent http://127.0.0.1:10101/speakers > /tmp/speakers.json
+          speaker="$(jq --raw-output '.[0].styles[0].id' /tmp/speakers.json)"
+          if [[ -z "${speaker}" || "${speaker}" == "null" ]]; then
+            echo "No speaker style was returned." >&2
+            exit 1
+          fi
+
+          curl --fail --silent --request POST --get \
+            --data-urlencode "text=Home Assistantからのテストです。" \
+            --data-urlencode "speaker=${speaker}" \
+            http://127.0.0.1:10101/audio_query \
+            | jq '.volumeScale = 1 | .pitchScale = 0 | .speedScale = 1' \
+            > /tmp/audio-query.json
+
+          curl --fail --silent --request POST --get \
+            --data-urlencode "speaker=${speaker}" \
+            --header "Content-Type: application/json" \
+            --data-binary @/tmp/audio-query.json \
+            http://127.0.0.1:10101/synthesis \
+            > /tmp/speech.wav
+
+          python3 - <<'PY'
+          import wave
+
+          with wave.open("/tmp/speech.wav", "rb") as audio:
+              assert audio.getnframes() > 0
+          PY
+
+      - name: Test persistent data after restart
+        shell: bash
+        run: |
+          test -n "$(find /tmp/aivisspeech-share/aivisspeech/Models -maxdepth 1 -name '*.aivmx' -print -quit)"
+          sudo touch /tmp/aivisspeech-share/aivisspeech/Models/persistence-marker
+          docker restart aivisspeech-smoke
+
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:10101/speakers > /tmp/speakers-after-restart.json; then
+              test -s /tmp/speakers-after-restart.json
+              test -f /tmp/aivisspeech-share/aivisspeech/Models/persistence-marker
+              exit 0
+            fi
+            if [[ "$(docker inspect --format '{{.State.Running}}' aivisspeech-smoke)" != "true" ]]; then
+              docker logs aivisspeech-smoke
+              exit 1
+            fi
+            sleep 10
+          done
+          docker logs aivisspeech-smoke
+          echo "AivisSpeech Engine did not restart within 20 minutes." >&2
+          exit 1
+
+      - name: Print engine log
+        if: always()
+        run: docker logs aivisspeech-smoke || true
