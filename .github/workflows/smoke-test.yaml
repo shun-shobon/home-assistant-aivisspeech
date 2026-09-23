@@ -74,29 +74,38 @@ jobs:
       - name: Test VOICEVOX-compatible synthesis
         shell: bash
         run: |
-          curl --fail --silent http://127.0.0.1:10101/speakers > /tmp/speakers.json
-          speaker="$(jq --raw-output '.[0].styles[0].id' /tmp/speakers.json)"
-          if [[ -z "${speaker}" || "${speaker}" == "null" ]]; then
-            echo "No speaker style was returned." >&2
-            exit 1
-          fi
-
-          curl --fail --silent --request POST --get \
-            --data-urlencode "text=Home Assistantからのテストです。" \
-            --data-urlencode "speaker=${speaker}" \
-            http://127.0.0.1:10101/audio_query \
-            | jq '.volumeScale = 1 | .pitchScale = 0 | .speedScale = 1' \
-            > /tmp/audio-query.json
-
-          curl --fail --silent --request POST --get \
-            --data-urlencode "speaker=${speaker}" \
-            --header "Content-Type: application/json" \
-            --data-binary @/tmp/audio-query.json \
-            http://127.0.0.1:10101/synthesis \
-            > /tmp/speech.wav
-
           python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
           import wave
+
+          base_url = "http://127.0.0.1:10101"
+
+          with urlopen(f"{base_url}/speakers") as response:
+              speakers = json.load(response)
+          assert speakers and speakers[0]["styles"]
+          speaker = speakers[0]["styles"][0]["id"]
+
+          audio_query_url = f"{base_url}/audio_query?" + urlencode(
+              {"text": "Home Assistantからのテストです。", "speaker": speaker}
+          )
+          with urlopen(Request(audio_query_url, method="POST")) as response:
+              audio_query = json.load(response)
+
+          audio_query["volumeScale"] = 1
+          audio_query["pitchScale"] = 0
+          audio_query["speedScale"] = 1
+          synthesis_url = f"{base_url}/synthesis?" + urlencode({"speaker": speaker})
+          request = Request(
+              synthesis_url,
+              data=json.dumps(audio_query).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urlopen(request) as response:
+              Path("/tmp/speech.wav").write_bytes(response.read())
 
           with wave.open("/tmp/speech.wav", "rb") as audio:
               assert audio.getnframes() > 0
