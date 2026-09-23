@@ -1,0 +1,14 @@
+name: AivisSpeech Engine
+version: "0.1.0"
+slug: aivisspeech_engine
+description: Run AivisSpeech Engine for Home Assistant TTS
+url: "https://github.com/shun-shobon/home-assistant-aivisspeech"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+map:
+  - type: share
+    read_only: false
+image: "ghcr.io/shun-shobon/home-assistant-aivisspeech"
